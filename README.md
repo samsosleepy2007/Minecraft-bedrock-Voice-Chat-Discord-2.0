@@ -48,10 +48,17 @@ Discord Bot สำหรับระบบ Proximity Voice ของ Minecraft B
 
 ```text
 .
-├── bot.py
+├── bot.py                    # entrypoint สำหรับ Render / Python
+├── bot_source.py.xz.b64      # source V1.6.4 แบบ lossless XZ + Base64
 ├── requirements.txt
 └── templates/
     └── dashboard.html
+```
+
+`bot.py` จะถอด `bot_source.py.xz.b64` กลับเป็น source Python V1.6.4 ในหน่วยความจำแล้วรันทันที ดังนั้นคำสั่งบน Render ยังคงเป็น `python bot.py` ตามเดิม การเก็บ source แบบ payload นี้ใช้เพื่อเลี่ยงข้อจำกัดขนาดไฟล์ของตัวเชื่อม GitHub ที่ใช้ในการอัปโหลดครั้งนี้ โดย source ต้นฉบับก่อนบีบอัดมี SHA-256:
+
+```text
+5392808e358032a0872fbd9cbc8246f15528e41cf6555b0243f9e6f27dd6cb3d
 ```
 
 ## Environment Variables
