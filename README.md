@@ -1,102 +1,67 @@
-# Minecraft Bedrock Voice Chat Discord 2.0
+# Minecraft Bedrock Voice Chat Discord 2.0 — V1.7.0
 
-Discord Bot สำหรับระบบ Proximity Voice ของ Minecraft Bedrock โดยทำงานร่วมกับ Bedrock Addon ผ่าน HTTP API แล้วจัดผู้เล่นเข้า Discord Voice Channel ตามกลุ่มเสียงที่ Addon คำนวณมา
+Bot Discord สำหรับ Minecraft Bedrock Voice Chat Connector V1.7.0
 
-## เวอร์ชันปัจจุบัน
+## อัปเดต V1.7.0
 
-**Bot V1.6.4 — Raycast Voice + Phone System Update**
+- Rework `/test` ใหม่: ผู้ใช้ต้องลงทะเบียน Xbox Gamertag ก่อนใช้งาน
+- `/test` ใช้ Gamertag ที่ลงทะเบียนเพื่อหา Minecraft world/snapshot ที่ผู้เล่นออนไลน์อยู่
+- Bot ส่งคำสั่งกลับ Minecraft ผ่าน response ของ `/update_coords`
+- Addon เสก Armor Stand ชื่อ `botvc` และ tag `vc:test_bot` ที่ตำแหน่ง/Dimension ของผู้ใช้
+- `botvc` เข้าระบบ Range + Centroid + Strict Distance + Raycast เหมือน participant จริง
+- Discord Bot VoiceClient จะ connect/move ไปตาม Acoustic Group ที่มี `botvc`
+- `/test` ซ้ำโดยเจ้าของ session จะปิด Test Mode, disconnect Bot และสั่งลบ `botvc`
+- เพิ่ม command ID + `command_acks` เพื่อป้องกันคำสั่งซ้ำเมื่อเครือข่ายหน่วง
+- หนึ่ง Discord Guild มี Test Session ได้หนึ่งชุดในเวลาเดียวกัน
+- ถ้า Bot restart แล้วพบ `botvc` ค้าง ระบบจะ queue คำสั่งลบอัตโนมัติ
 
-> Addon ที่ใช้งานคู่กันควรเป็น V1.6.4 เพื่อใช้ protocol v2 / acoustic groups แบบใหม่ได้ครบถ้วน
+## ถอดระบบ Legacy
 
-## อัปเดต / แก้ไขใน V1.6.4
+V1.7.0 ลบระบบ Zone / Part / Room ออกจาก voice architecture แล้ว:
 
-### ระบบ Voice / Raycast
+- ลบ HTTP `/zones` และ `/zone/*`
+- ลบ Discord `/zone`, `/zones`, `/delzone`, `/zonerange`, `/range`
+- ลบ Zone/Room routing และ centroid fallback เก่าฝั่ง Bot
+- Minecraft Addon V1.7.0 ใช้ Acoustic Groups จาก Raycast เป็นระบบ proximity เพียงระบบเดียว
+- ถ้า `server_data.json` เก่ามีข้อมูล Zone บอตจะสร้าง `server_data.json.before_remove_zones_*.json` ก่อน migration แล้วลบ field `zones`
 
-- เพิ่มการรองรับ `protocol_version: 2`
-- รับ `acoustic_groups` ที่ Minecraft Addon คำนวณจาก **Range + Group Centroid + Strict Pair Distance + Player-to-Player Raycast**
-- Bot ไม่ต้องคำนวณ geometry หรือกำแพงของโลก Minecraft เองเมื่อใช้ protocol v2
-- รองรับข้อมูล `dimension` เพื่อไม่ให้ผู้เล่นคนละ Dimension ถูกจัด proximity group ร่วมกัน
-- เพิ่ม `guild_id`, `world_id`, `sequence` และ `timestamp` ใน snapshot รุ่นใหม่
-- แยก runtime state ตาม **Discord Guild + Minecraft World** เพื่อลดปัญหา snapshot ของอีกโลกเขียนทับกัน
-- ปฏิเสธ/หลีกเลี่ยง snapshot เก่าที่ลำดับไม่ถูกต้อง
-- Phone Call / Group Call ยังมี priority สูงกว่า Raycast proximity
-- รักษา `call-room-fix` และการจอง Voice Channel สำหรับผู้เล่นที่กำลังโทร
-- Zone / Part / Room เดิมยังคงอยู่เป็น **Legacy/Fallback** สำหรับ payload รุ่นเก่าในช่วงเปลี่ยนระบบ
+## Protocol V3
 
-### ความเสถียรของ Bot
+Minecraft ส่งข้อมูลหลัก:
 
-- แก้ลำดับการโหลดข้อมูลที่เดิมสามารถเรียก `load_data()` ก่อน helper ของ zone range พร้อมใช้งาน
-- เพิ่ม runtime lock/state สำหรับการประมวลผล snapshot แยกแต่ละ world
-- ยังคงรองรับ IC Name map ที่ส่งกลับ Minecraft
-- ยังคงรองรับ server mute / server deafen จากสถานะไมค์และหูฟังใน Addon
+- `protocol_version: 3`
+- `guild_id`
+- `world_id`
+- `sequence`
+- `timestamp`
+- `users` พร้อม `dimension`
+- `acoustic_groups`
+- `calls`
+- `command_acks`
 
-### การเปลี่ยนแปลงฝั่ง Addon ที่ทำงานคู่กับ Bot V1.6.4
+Bot ตอบกลับ:
 
-- Proximity Voice หลักเปลี่ยนจาก Zone/Room ไปเป็น **Raycast Acoustic Groups**
-- ใช้ Group Centroid เป็น candidate/broad-phase และตรวจระยะจริงระหว่างสมาชิกทุกคนก่อนรวมกลุ่ม
-- ใช้ Raycast ระหว่างผู้เล่นเพื่อกันเสียงเมื่อมีกำแพง/สิ่งกีดขวาง
-- เพิ่ม Join/Leave hysteresis เพื่อลดการสลับ Discord Voice Channel ที่ขอบระยะ
-- เพิ่ม Dimension เข้า voice snapshot
-- ผู้เล่นจะไม่ถูกสุ่มเบอร์โทรให้อัตโนมัติเมื่อเข้าเซิร์ฟเวอร์
-- ใช้โทรศัพท์ครั้งแรกจะให้เลือกเบอร์เอง **4 หลัก ตัวเลขเท่านั้น**
-- `0000` สงวนไว้สำหรับ `botvc`
-- เพิ่ม Phone Number Registry ระดับโลกเพื่อป้องกันเลขซ้ำ แม้เจ้าของเลขออฟไลน์
-- กรอกเบอร์ตัวเองผิด/ไม่ครบ/เกิน/ไม่ใช่ตัวเลข/ซ้ำ จะให้กรอกใหม่
-- เวลาโทรหรือส่งข้อความ หากกรอกเบอร์ปลายทางผิดหรือว่าง จะกลับหน้า Home ของโทรศัพท์แทนการเปิดฟอร์มเดิมวนซ้ำ เพื่อแก้ UX โดยเฉพาะบน iPhone
+- `ic_map`
+- `commands`
 
-## โครงสร้าง
+## Commands
 
-```text
-.
-├── bot.py                    # entrypoint สำหรับ Render / Python
-├── bot_source.py.xz.b64      # source V1.6.4 แบบ lossless XZ + Base64
-├── requirements.txt
-└── templates/
-    └── dashboard.html
-```
+- `/setup` — ตั้ง Main Voice Category + Lobby
+- `/backup` — สำรองข้อมูล Bot
+- `/restore` — กู้ข้อมูล Bot
+- `/whitelist` — จัดการ whitelist (ผู้ดูแล)
+- `/test` — Test botvc สำหรับผู้ใช้ที่ลงทะเบียนแล้ว
 
-`bot.py` จะถอด `bot_source.py.xz.b64` กลับเป็น source Python V1.6.4 ในหน่วยความจำแล้วรันทันที ดังนั้นคำสั่งบน Render ยังคงเป็น `python bot.py` ตามเดิม การเก็บ source แบบ payload นี้ใช้เพื่อเลี่ยงข้อจำกัดขนาดไฟล์ของตัวเชื่อม GitHub ที่ใช้ในการอัปโหลดครั้งนี้ โดย source ต้นฉบับก่อนบีบอัดมี SHA-256:
-
-```text
-5392808e358032a0872fbd9cbc8246f15528e41cf6555b0243f9e6f27dd6cb3d
-```
-
-## Environment Variables
-
-ตั้งค่าบน Render หรือระบบโฮสต์ที่ใช้:
-
-```text
-DISCORD_TOKEN=Discord bot token
-DASHBOARD_PASS=Dashboard password
-PORT=8080
-```
-
-`LOG_WEBHOOK_URL` เป็น optional ตามโค้ดปัจจุบัน
-
-> ควรกำหนด `DASHBOARD_PASS` เองใน environment และไม่ใช้ค่า default สำหรับ production
-
-## ติดตั้ง
+## Run
 
 ```bash
 pip install -r requirements.txt
 python bot.py
 ```
 
-Dependencies หลัก:
+Environment variables:
 
-- discord.py
-- aiohttp
-- jinja2
-- PyNaCl
-
-## การใช้งานร่วมกับ Minecraft
-
-Bot เปิด HTTP server ด้วย `aiohttp` และรับ snapshot จาก Minecraft Bedrock Dedicated Server / Addon ผ่าน endpoint `/update_coords` จากนั้นจัด Discord Voice Channel ตามสถานะ proximity/call
-
-สำหรับระบบ Raycast แบบใหม่ ให้ใช้ Addon V1.6.4 ที่ส่ง protocol v2 และ `acoustic_groups`
-
-## หมายเหตุ
-
-- ระบบเสียงจริงยังส่งผ่าน Discord Voice ไม่ได้ส่ง audio microphone ผ่าน Minecraft
-- Raycast และการตรวจ block ทำที่ฝั่ง Minecraft Addon ส่วน Bot มีหน้าที่จัดกลุ่ม Discord Voice Channel ตามผลที่ได้รับ
-- Zone/Part/Room ยังถูกเก็บไว้ใน V1.6.4 เพื่อ compatibility/fallback และมีแผนถอด legacy voice logic หลังระบบ Raycast ผ่านการทดสอบจริง
+- `DISCORD_TOKEN`
+- `DASHBOARD_PASS`
+- `PORT`
+- `LOG_WEBHOOK_URL` (optional)
