@@ -2,7 +2,7 @@ from pathlib import Path
 import base64
 import lzma
 
-# V1.7.4 hotfix layer over the lossless V1.7.0 source.
+# V1.7.5 hotfix layer over the lossless V1.7.0 source.
 # Render can keep using: python bot.py
 _payload_path = Path(__file__).with_name("bot_source.py.xz.b64")
 _source = lzma.decompress(base64.b64decode(_payload_path.read_text(encoding="utf-8").strip())).decode("utf-8")
@@ -12,25 +12,118 @@ def _patch_once(old, new, label):
     """Apply one required source hotfix and fail loudly if the embedded source changed."""
     global _source
     if old not in _source:
-        raise RuntimeError(f"V1.7.4 hotfix anchor not found: {label}")
+        raise RuntimeError(f"V1.7.5 hotfix anchor not found: {label}")
     _source = _source.replace(old, new, 1)
 
 
-_patch_once('BOT_VERSION = "1.7.0"', 'BOT_VERSION = "1.7.4"', "BOT_VERSION")
+_patch_once('BOT_VERSION = "1.7.0"', 'BOT_VERSION = "1.7.5"', "BOT_VERSION")
 
-# V1.7.4 owns player move throttling with a per-member wrapper below. Disable
-# the legacy global 3-second gate so different Minecraft guilds can use their
-# own move_delay and so one member never serializes another member's moves.
+# V1.7.5 owns voice stability delay at the desired-state boundary below. The
+# old V1.7.0 cooldown is disabled so it cannot silently add a second ~3s gate.
 _patch_once('MOVE_COOLDOWN = 3.0', 'MOVE_COOLDOWN = 0.0', "legacy MOVE_COOLDOWN")
 
-_patch_once('# --- ระบบจัดการห้องเสียง V1.7.0: Acoustic Groups only ---', '''# --- V1.7.4 runtime Voice Move Delay -----------------------------------------
-# Addon Protocol V3 may include optional move_delay (0.0-5.0 seconds).
-# Capture it as soon as aiohttp decodes /update_coords JSON, then enforce the
-# delay per Discord member at the actual Member.move_to boundary. This keeps
-# the setting local to each guild and prevents a global sleep/queue.
+_patch_once('# --- ระบบจัดการห้องเสียง V1.7.0: Acoustic Groups only ---', '''# --- V1.7.5 desired-state Voice Move Delay ----------------------------------
+# Protocol V3 optional move_delay means: after the desired Discord destination
+# changes, that destination must remain stable for N seconds before the move.
+# This is a debounce/stability timer, NOT time-since-last-move cooldown.
+import contextvars
+
 VC_DEFAULT_MOVE_DELAY = 3.0
 vc_move_delay_by_guild = {}
-vc_member_last_move = {}
+vc_member_pending = {}
+vc_member_generation = {}
+vc_member_recent_target = {}
+vc_move_events_by_guild = {}
+_vc_request_guild_context = contextvars.ContextVar("vc_request_guild_id", default=None)
+
+
+def _vc_channel_id(channel):
+    return getattr(channel, "id", None) if channel is not None else None
+
+
+def _vc_current_channel_id(member):
+    voice = getattr(member, "voice", None)
+    channel = getattr(voice, "channel", None) if voice else None
+    return getattr(channel, "id", None) if channel is not None else None
+
+
+def _vc_cancel_pending(key, *, reason="superseded"):
+    state = vc_member_pending.pop(key, None)
+    if not state:
+        return
+    task = state.get("task")
+    if task is not None and not task.done():
+        task.cancel()
+    if reason:
+        print(
+            f"[Voice {BOT_VERSION}] Delay cancel {state.get('member_name')} -> "
+            f"{state.get('target_name')} [{reason}]"
+        )
+
+
+def _vc_event(guild_id, **values):
+    if guild_id is None:
+        return
+    event = vc_move_events_by_guild.setdefault(guild_id, {})
+    event.update(values)
+
+
+async def _vc_execute_pending_move(key, generation):
+    state = vc_member_pending.get(key)
+    if not state or state.get("generation") != generation:
+        return
+    try:
+        remaining = max(0.0, state["due_at"] - time.monotonic())
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        state = vc_member_pending.get(key)
+        if not state or state.get("generation") != generation:
+            return
+        member = state["member"]
+        channel = state["channel"]
+        target_id = state["target_id"]
+        if _vc_current_channel_id(member) == target_id:
+            vc_member_pending.pop(key, None)
+            return
+        requested_at = time.monotonic()
+        _vc_event(
+            state["guild_id"],
+            last_member=state["member_name"],
+            last_target=state["target_name"],
+            last_requested_at=requested_at,
+        )
+        print(
+            f"[Voice {BOT_VERSION}] Delay MOVE {state['member_name']} -> {state['target_name']} "
+            f"after {max(0.0, requested_at - state['detected_at']):.3f}s "
+            f"(configured {state['delay']:.1f}s)"
+        )
+        await _vc_original_member_move_to(member, channel, reason=state.get("reason"))
+        completed_at = time.monotonic()
+        vc_member_recent_target[key] = (target_id, completed_at)
+        _vc_event(
+            state["guild_id"],
+            last_completed_at=completed_at,
+            last_member=state["member_name"],
+            last_target=state["target_name"],
+        )
+        current = vc_member_pending.get(key)
+        if current and current.get("generation") == generation:
+            vc_member_pending.pop(key, None)
+        print(
+            f"[Voice {BOT_VERSION}] Delay moved {state['member_name']} -> {state['target_name']} "
+            f"API={max(0.0, completed_at - requested_at):.3f}s"
+        )
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        current = vc_member_pending.get(key)
+        if current and current.get("generation") == generation:
+            vc_member_pending.pop(key, None)
+        print(
+            f"[Voice {BOT_VERSION}] Delayed member move failed {key}: "
+            f"{type(exc).__name__}: {exc}"
+        )
+
 
 _vc_original_request_json = web.Request.json
 async def _vc_request_json_with_move_delay(request, *args, **kwargs):
@@ -41,6 +134,7 @@ async def _vc_request_json_with_move_delay(request, *args, **kwargs):
             guild_id = int(str(raw_guild_id).strip())
         except (TypeError, ValueError):
             guild_id = None
+        _vc_request_guild_context.set(guild_id)
         if guild_id is not None:
             try:
                 delay = float(payload.get("move_delay", VC_DEFAULT_MOVE_DELAY))
@@ -52,35 +146,146 @@ async def _vc_request_json_with_move_delay(request, *args, **kwargs):
             previous = vc_move_delay_by_guild.get(guild_id)
             vc_move_delay_by_guild[guild_id] = delay
             if previous is None or abs(previous - delay) > 1e-9:
-                print(f"[Voice {BOT_VERSION}] Guild {guild_id} move delay = {delay:.1f}s")
+                print(f"[Voice {BOT_VERSION}] Guild {guild_id} desired-state move delay = {delay:.1f}s")
     return payload
 web.Request.json = _vc_request_json_with_move_delay
 
+
 _vc_original_member_move_to = discord.Member.move_to
-async def _vc_rate_limited_member_move_to(member, channel, *, reason=None):
+async def _vc_desired_state_member_move_to(member, channel, *, reason=None):
     guild = getattr(member, "guild", None)
     guild_id = getattr(guild, "id", None)
     member_id = getattr(member, "id", None)
-    current_voice = getattr(member, "voice", None)
-    current_channel = getattr(current_voice, "channel", None) if current_voice else None
-    target_id = getattr(channel, "id", None) if channel is not None else None
+    if guild_id is None or member_id is None:
+        return await _vc_original_member_move_to(member, channel, reason=reason)
 
-    # Never spend a Discord move request when the desired state already matches.
-    if current_channel is not None and target_id is not None and current_channel.id == target_id:
+    key = (guild_id, member_id)
+    target_id = _vc_channel_id(channel)
+    target_name = getattr(channel, "name", "Disconnected") if channel is not None else "Disconnected"
+    member_name = getattr(member, "display_name", None) or getattr(member, "name", str(member_id))
+
+    # Desired state already matches reality: clear stale pending work.
+    if _vc_current_channel_id(member) == target_id:
+        _vc_cancel_pending(key, reason=None)
+        return None
+
+    # Avoid a duplicate REST move while Discord voice-state propagation catches
+    # up immediately after a just-completed request to this same target.
+    recent = vc_member_recent_target.get(key)
+    now = time.monotonic()
+    if recent and recent[0] == target_id and (now - recent[1]) < 2.0:
         return None
 
     delay = vc_move_delay_by_guild.get(guild_id, VC_DEFAULT_MOVE_DELAY)
-    key = (guild_id, member_id)
-    now = time.monotonic()
-    last = vc_member_last_move.get(key, -1e12)
-    if delay > 0.0 and (now - last) < delay:
-        return None
+    state = vc_member_pending.get(key)
 
-    result = await _vc_original_member_move_to(member, channel, reason=reason)
-    vc_member_last_move[key] = time.monotonic()
-    return result
+    # Same desired target across repeated Minecraft snapshots MUST NOT restart
+    # the timer. If the admin changes delay while pending, preserve detected_at
+    # and only recalculate due_at against the new configured delay.
+    if state and state.get("target_id") == target_id:
+        if abs(state.get("delay", delay) - delay) <= 1e-9:
+            return None
+        detected_at = state["detected_at"]
+        _vc_cancel_pending(key, reason="delay-changed")
+    else:
+        detected_at = now
+        if state:
+            _vc_cancel_pending(key, reason="target-changed")
+        print(
+            f"[Voice {BOT_VERSION}] Delay desired {member_name} -> {target_name}; "
+            f"configured={delay:.1f}s"
+        )
+        _vc_event(
+            guild_id,
+            last_detected_at=detected_at,
+            last_member=member_name,
+            last_target=target_name,
+        )
 
-discord.Member.move_to = _vc_rate_limited_member_move_to
+    generation = vc_member_generation.get(key, 0) + 1
+    vc_member_generation[key] = generation
+    due_at = detected_at + delay
+
+    # Delay 0 means immediate at the first allocator decision; only snapshot,
+    # HTTP and Discord API latency remain.
+    if due_at <= now + 1e-6:
+        requested_at = time.monotonic()
+        _vc_event(
+            guild_id,
+            last_requested_at=requested_at,
+            last_member=member_name,
+            last_target=target_name,
+        )
+        print(
+            f"[Voice {BOT_VERSION}] Delay MOVE {member_name} -> {target_name} "
+            f"after {max(0.0, requested_at - detected_at):.3f}s (configured {delay:.1f}s)"
+        )
+        result = await _vc_original_member_move_to(member, channel, reason=reason)
+        completed_at = time.monotonic()
+        vc_member_recent_target[key] = (target_id, completed_at)
+        _vc_event(guild_id, last_completed_at=completed_at)
+        print(
+            f"[Voice {BOT_VERSION}] Delay moved {member_name} -> {target_name} "
+            f"API={max(0.0, completed_at - requested_at):.3f}s"
+        )
+        return result
+
+    pending = {
+        "guild_id": guild_id,
+        "member": member,
+        "member_name": member_name,
+        "channel": channel,
+        "target_id": target_id,
+        "target_name": target_name,
+        "detected_at": detected_at,
+        "due_at": due_at,
+        "delay": delay,
+        "reason": reason,
+        "generation": generation,
+        "task": None,
+    }
+    vc_member_pending[key] = pending
+    pending["task"] = asyncio.create_task(_vc_execute_pending_move(key, generation))
+    print(
+        f"[Voice {BOT_VERSION}] Delay scheduled {member_name} -> {target_name} "
+        f"in {max(0.0, due_at - now):.3f}s"
+    )
+    return None
+
+discord.Member.move_to = _vc_desired_state_member_move_to
+
+
+# Inject applied-delay and pending timer diagnostics into the normal
+# /update_coords JSON response when the base V1.7.0 handler uses web.json_response.
+_vc_original_json_response = web.json_response
+def _vc_json_response_with_move_delay(data=None, *args, **kwargs):
+    guild_id = _vc_request_guild_context.get()
+    if guild_id is not None and isinstance(data, dict) and "ic_map" in data and "commands" in data:
+        now = time.monotonic()
+        pending = []
+        for (pending_guild_id, _member_id), state in list(vc_member_pending.items()):
+            if pending_guild_id != guild_id:
+                continue
+            task = state.get("task")
+            if task is not None and task.done():
+                continue
+            pending.append(max(0.0, state.get("due_at", now) - now))
+        event = vc_move_events_by_guild.get(guild_id, {})
+        enriched = dict(data)
+        enriched["move_delay_applied"] = vc_move_delay_by_guild.get(guild_id, VC_DEFAULT_MOVE_DELAY)
+        enriched["move_delay_debug"] = {
+            "pending_count": len(pending),
+            "min_remaining": round(min(pending), 3) if pending else 0.0,
+            "max_remaining": round(max(pending), 3) if pending else 0.0,
+            "last_member": event.get("last_member"),
+            "last_target": event.get("last_target"),
+            "last_detected_age": round(max(0.0, now - event["last_detected_at"]), 3) if event.get("last_detected_at") else None,
+            "last_requested_age": round(max(0.0, now - event["last_requested_at"]), 3) if event.get("last_requested_at") else None,
+            "last_completed_age": round(max(0.0, now - event["last_completed_at"]), 3) if event.get("last_completed_at") else None,
+        }
+        data = enriched
+    return _vc_original_json_response(data, *args, **kwargs)
+web.json_response = _vc_json_response_with_move_delay
 
 
 async def ensure_bot_voice_connection(guild, target, reason="acoustic-test"):
@@ -152,7 +357,8 @@ async def ensure_bot_voice_connection(guild, target, reason="acoustic-test"):
         return False
 
 
-# --- ระบบจัดการห้องเสียง V1.7.4: Acoustic Groups only ---''', "voice helper + move delay")
+# --- ระบบจัดการห้องเสียง V1.7.5: Acoustic Groups only ---''', "voice helper + desired-state delay")
+
 _patch_once('''            if mem == guild.me:
                 try:
                     if guild.voice_client:
@@ -167,6 +373,7 @@ _patch_once('''            if mem == guild.me:
                 await ensure_bot_voice_connection(guild, target, reason="acoustic-group")
                 continue
 ''', "acoustic bot routing")
+
 _patch_once('''        await assign_acoustic_groups_in_category(
             guild,
             snapshot_acoustic_groups,
@@ -202,4 +409,5 @@ _patch_once('''        await assign_acoustic_groups_in_category(
                 test_target = start_channel
             await ensure_bot_voice_connection(guild, test_target, reason="test-fallback")
 ''', "test fallback")
-exec(compile(_source, "bot_v1.7.4.py", "exec"), globals(), globals())
+
+exec(compile(_source, "bot_v1.7.5.py", "exec"), globals(), globals())
