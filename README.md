@@ -1,20 +1,24 @@
-# Minecraft Bedrock Voice Chat Discord 2.0 — Bot V1.7.5 / Addon V1.7.5
+# Minecraft Bedrock Voice Chat Discord 2.0 — Bot V1.7.5 / Addon V1.7.6
 
 Discord Bot + Minecraft Bedrock Voice Chat Connector สำหรับระบบ Proximity Voice แบบ Acoustic Groups / Raycast
 
-## V1.7.5 — Acoustic Span Accuracy + Desired-State Move Delay
+## V1.7.6 — Enclosed Room + Hit-Face Parallel Barrier
 
-V1.7.5 แก้สองประเด็นจาก V1.7.4:
+V1.7.6 แก้ regression ของ Addon V1.7.5 ที่กำแพงจริงขนาด 6×6 สามารถถูกตีความว่าเล็กเกิน Mic Range แล้วปล่อยให้ผู้เล่นเชื่อม Voice กันได้
 
-1. Barrier Span เดิมนับ cell แบบ `non-air = wall` ทำให้ geometry บางชนิดมีโอกาสถูกนับเป็นความกว้าง/สูงของกำแพงทั้งที่ acoustic ray ควรผ่านได้
-2. `Voice Move Delay` เดิมเป็น cooldown หลังการย้ายครั้งก่อน ไม่ใช่เวลาหน่วงหลัง desired Voice Channel เปลี่ยนจริง จึงทำให้ค่าที่ตั้ง `0` หรือ `5` ไม่สัมพันธ์กับเวลาที่ผู้ใช้ถูกย้ายอย่างที่คาด
+สาเหตุหลักที่แก้:
 
-## Addon V1.7.5 — Acoustic-blocking Barrier Span
+1. V1.7.5 เดาแกนความกว้างของกำแพงจากทิศ A↔B ทำให้การยิงเฉียงมีโอกาสวัด “ความหนา” ของกำแพงแทน “ความกว้าง”.
+2. short cell probe ของ V1.7.5 เริ่มใกล้/ภายใน collision volume ของ block ที่กำลังตรวจ จึงไม่ควรใช้เป็นตัวตัดสิน span ของกำแพง.
 
-กติกาหลักยังคงเดิม:
+V1.7.6 เปลี่ยนเป็น `BlockRaycastHit.face` + parallel acoustic rays และเพิ่มระบบตรวจห้องปิดสนิท.
+
+## กฎ Acoustic Barrier ใหม่
+
+สิ่งกีดขวางทั่วไปยังใช้:
 
 ```text
-Barrier blocks voice เมื่อ:
+BLOCK เมื่อ
 width >= ceil(Mic Range)
 AND
 height >= ceil(Mic Range)
@@ -29,102 +33,154 @@ height >= ceil(Mic Range)
 | 5 × 3 | เชื่อม |
 | 5 × 4 | เชื่อม |
 | 5 × 5 | กันเสียง |
-| 6 × 5 | กันเสียง |
+| 6 × 6 | กันเสียง |
 
-V1.7.5 เปลี่ยนตัวตรวจ span cell จากการเช็กว่า block ไม่ใช่ air/liquid อย่างเดียว เป็น short collision-aware ray probes ที่ใช้ `getBlockFromRay(... includePassableBlocks:false)` ในทิศของ acoustic path แล้ว cache ผลต่อ snapshot
-
-ผลคือ passable/open geometry จะไม่ถูกนับเพิ่มเข้า width/height แบบง่าย ๆ ขณะที่ closed/full geometry ยังสามารถเป็นส่วนหนึ่งของ Acoustic Barrier ได้
-
-ยังคงระบบเดิมทั้งหมด:
-
-- symmetric A→B / B→A raycast จาก V1.7.3
-- Head OR Chest path
-- Join Range = `R`
-- Leave Range = `R + 2`
-- Dimension separation
-- Centroid constraint
-- Strict pair validation
-- stable merge / re-entry fix จาก V1.7.2
-- per-snapshot pair cache
-- Barrier Span scan ประมาณ `O(R)` ไม่ scan cube
-
-## Bot V1.7.5 — Desired-State Debounce Timer
-
-`move_delay` มีความหมายใหม่ที่ตรงกับ UI:
-
-> เมื่อ Bot ตรวจพบว่า desired Discord Voice Channel ของสมาชิกเปลี่ยน ต้องให้ target ใหม่นั้นคงที่ครบ `move_delay` วินาทีก่อนจึงย้าย
-
-ตัวอย่าง `move_delay = 5.0`:
+แต่ถ้าเป็น **ห้องปิดสนิท** จะใช้กฎพิเศษ:
 
 ```text
-t=0.0  desired Room1 -> Room2
-       start timer
-
-t=1.0  snapshot ยังต้อง Room2
-       timer เดิมเดินต่อ ไม่ reset
-
-t=5.0  target ยังเป็น Room2
-       MOVE
+A อยู่ใน sealed acoustic component
+B อยู่นอก component เดียวกัน
+→ BLOCK เสมอ
 ```
 
-ถ้า target เปลี่ยนก่อนครบเวลา:
+ดังนั้นห้องขนาดเล็กกว่า Mic Range ก็ยังกันเสียง ถ้าปิดรอบด้านจริงทั้งผนัง + หลังคา + พื้น.
+
+## Hit-Face Parallel Barrier Scan
+
+V1.7.6 ใช้หน้าของ block ที่ Ray ชนจริง:
 
 ```text
-t=0.0  target Room2
-
-t=2.0  target กลับ Room1
-       cancel pending Room2
-       ไม่เกิด stale move
+East / West -> normal X, width Z
+North / South -> normal Z, width X
 ```
 
-กฎสำคัญ:
+จากนั้นเลื่อน A↔B ray แบบขนานไปตามแกนความกว้างและแกน Y เพื่อวัด span ของ barrier.
 
-- `0.0` → move ใน allocator decision แรก เหลือเพียง Minecraft snapshot / network / Discord API latency
-- `0.1–5.0` → target ต้องนิ่งครบเวลาที่ตั้ง
-- snapshot ซ้ำ target เดิมไม่ reset timer
-- เปลี่ยน target → cancel pending เก่าและเริ่ม desired state ใหม่
-- แยก pending timer ต่อ Discord Member
-- legacy `MOVE_COOLDOWN = 3.0` ถูกปิดเพื่อไม่ให้มี second 3-second gate
-- ไม่ส่ง move ซ้ำถ้า Discord state ตรง target แล้ว
-- มี short duplicate suppression หลัง move สำเร็จเพื่อรอ Voice State propagation
+parallel ray จะนับเป็น barrier เดียวกันเฉพาะเมื่อ first hit อยู่บน wall-normal coordinate เดียวกับ anchor hit จึงไม่เอาสิ่งกีดขวางอื่นที่อยู่ไกลกว่าไปเพิ่มความกว้างโดยผิดพลาด.
 
-## `/test` Realtime Diagnostics
+ผลคือกำแพง 6×6 ยังคงถูกอ่านว่าใหญ่พอแม้ A/B จะยืนเฉียงกับกำแพง.
 
-Performance Counter ใน Minecraft Action Bar ยังทำงานแบบ realtime สำหรับผู้เล่นทุกคนเมื่อ `/test` active และมี `botvc`
+## Enclosed Room Detection
 
-V1.7.5 เพิ่มข้อมูล Move Delay:
+ห้องปิดสนิทตรวจเฉพาะเมื่อ Head และ Chest direct paths ถูกบังทั้งคู่ เพื่อลด overhead.
+
+ระบบใช้:
+
+- 2D acoustic flood-fill ที่ระดับอกของผู้เล่น
+- collision-aware one-block transitions ด้วย `getBlockFromRay(... includePassableBlocks:false)`
+- search radius = `ceil(Range) + 1`
+- safety node budget สูงสุด 4096
+- ถ้า flood-fill ออกถึง boundary -> ไม่ถือว่าปิด
+- ถ้าคอลัมน์ใดไม่มีหลังคาหรือพื้นภายใน bounded vertical search -> ไม่ถือว่าปิด
+- per-snapshot enclosure cache + transition cache
+
+เหตุผลที่ใช้ 2D + vertical closure แทน 3D flood-fill เต็มก้อนคือควบคุม cost ให้ใกล้ O(R²) แทน O(R³).
+
+ห้องใหญ่ที่เกิน bounded enclosure search ยังมีกฎ Barrier Width/Height เป็น fallback อยู่ จึงเน้น Enclosed Room Detection ไปที่เคสสำคัญคือ “ห้องเล็กกว่าระยะ แต่ปิดสนิท”.
+
+## `/test` Realtime Barrier Diagnostics
+
+Performance Counter ใน Action Bar ของผู้เล่นทุกคนยังคงทำงานเมื่อ `/test` active และมี `botvc`.
+
+V1.7.6 เพิ่ม debug barrier เช่น:
+
+```text
+B:ENC BLOCK
+B:W W5+ H5+ BLOCK
+B:E W5+ H3 PASS
+```
+
+ตัวอย่างเต็ม:
 
 ```text
 VC TEST PERF 3ms (avg 2.4 / max 5)
-| Tick 6.0% | P8 G3 Pair18 Ray31 Wall6 Cache4
-| Dcfg5.0 Bot5.0 Pend1:2.7s
+| Tick 6.0% | P8 G3 Pair18 Ray31 Wall6 Enc2 Cache4
+| Dcfg5.0 Bot5.0 Pend0
+| B:ENC BLOCK
 ```
 
-ความหมาย:
+Counter ใหม่:
 
-- `Dcfg` — ค่าที่ Addon ตั้งและส่งไป
-- `Bot` — ค่าที่ Bot parse/apply แล้ว
-- `Pend` — จำนวน pending member moves และ remaining ต่ำสุด
+- `parallel_rays`
+- `enclosure_checks`
+- `enclosure_cache_hits`
+- `enclosure_transition_cache_hits`
+- `enclosure_nodes`
+- `enclosure_rays`
+- `enclosure_vertical_rays`
+- `enclosure_blocks`
 
-Bot เพิ่ม optional response fields:
+V1.7.5 `barrier_cell_cache_hits` / `barrier_probe_rays` ถูกถอด เพราะ inside-block cell probe classifier ไม่ใช้อีกแล้ว.
 
-```json
-{
-  "move_delay_applied": 5.0,
-  "move_delay_debug": {
-    "pending_count": 1,
-    "min_remaining": 2.7,
-    "max_remaining": 2.7,
-    "last_member": "PlayerA",
-    "last_target": "Voice Room 2",
-    "last_detected_age": 2.3,
-    "last_requested_age": null,
-    "last_completed_age": null
-  }
-}
+## Regression V1.7.6
+
+Mock geometry regression โดยใช้ helper logic ของ V1.7.6:
+
+```text
+Range 5 + wall 5×3                  -> PASS
+Range 5 + wall 5×4                  -> PASS
+Range 5 + wall 5×5                  -> BLOCK
+Range 5 + wall 6×6                  -> BLOCK
+Range 5 + wall 6×6 diagonal         -> BLOCK
+small sealed room vs outside        -> BLOCK / ENC BLOCK
+open door aligned with A/B          -> PASS
+same sealed room + small pillar     -> PASS
+tiny sealed room smaller than R     -> BLOCK / ENC BLOCK
+tiny roofless room smaller than R   -> PASS
 ```
 
-Render logs จะมี timestamp แบบ monotonic สำหรับ desired target, scheduled timer, move request และ completion เพื่อแยกว่า latency เกิดที่ timer หรือ Discord API
+Package/static validation:
+
+- JavaScript `node --check`: ผ่าน
+- JSON parse: 18 files ผ่าน
+- ZIP CRC/integrity: ผ่าน
+- package entries: 81
+- Behavior Pack / Resource Pack version: `[1,7,6]`
+- UUID เดิมยังคงเดิม
+
+SHA-256 ของ Addon V1.7.6:
+
+```text
+9cfed40403f4ce7b0e6f6a6a0d566e2fc387bb30332186c64978cb308c2ad6e3
+```
+
+Implementation notes ใน repository:
+
+```text
+addon-patches/v1.7.6-enclosed-room-parallel-barrier.md
+```
+
+> Mock/static tests ยังไม่แทน BDS geometry จริง ควรทดสอบ Door, Trapdoor, Slab, Fence, Glass, wall edge/corner และห้องเปิดหลังคาบน server จริงด้วย `/test` diagnostics.
+
+## Bot V1.7.5 — Desired-State Move Delay
+
+Bot ยังเป็น V1.7.5 เพราะรอบ V1.7.6 แก้เฉพาะ Minecraft acoustic geometry.
+
+`move_delay` หมายถึงเวลาที่ desired Discord Voice target ต้องนิ่งก่อนย้าย ไม่ใช่ cooldown หลังการย้ายครั้งก่อน.
+
+```text
+t=0.0 target Room2 -> start timer
+t=1.0 target ยัง Room2 -> timer เดินต่อ
+t=5.0 เมื่อ delay=5.0 -> MOVE
+```
+
+ถ้า target เปลี่ยนก่อนครบเวลา pending เก่าจะถูกยกเลิก.
+
+กฎ:
+
+- `0.0` -> move ใน allocator decision แรก
+- `0.1–5.0` -> target ต้องนิ่งครบเวลาที่ตั้ง
+- same target snapshot ไม่ reset timer
+- target เปลี่ยน -> cancel pending เก่า
+- per-member pending state
+- legacy `MOVE_COOLDOWN = 3.0` ปิดแล้ว
+- ไม่ move ซ้ำเมื่อ Discord state ตรง target
+
+`/test` Action Bar ยังแสดง:
+
+```text
+Dcfg5.0 Bot5.0 Pend1:2.7s
+```
 
 ## Voice Move Delay Setting
 
@@ -136,7 +192,7 @@ step = 0.1
 default/recommended = 3.0
 ```
 
-ค่าต่ำกว่า `3.0` ยังคงมีหน้าคำเตือนและให้เลือกยืนยันหรือคืนค่าเดิม
+ค่าต่ำกว่า `3.0` มีหน้าคำเตือนและให้ยืนยันหรือคืนค่าเดิม.
 
 Dynamic Property:
 
@@ -152,70 +208,35 @@ Protocol V3 optional field:
 }
 ```
 
-ค่า invalid / missing ฝั่ง Bot fallback เป็น `3.0`
+Bot invalid / missing value fallback เป็น `3.0`.
 
-## Regression V1.7.5
+## Version History
 
-Barrier mock regression:
+### Addon V1.7.6
 
-```text
-1x2  -> connect
-4x5  -> connect
-5x3  -> connect
-5x4  -> connect
-5x5  -> blocked
-6x5  -> blocked
-```
+- sealed room always blocks outside participants
+- hit-face-aware wall orientation
+- parallel acoustic span rays
+- fixes 6×6 wall false-pass regression
+- `/test` barrier/enclosure diagnostics
 
-Desired-state delay regression:
+### V1.7.5
 
-```text
-0.0     -> immediate decision path
-repeated same target -> timer does not reset
-pending target       -> no move before due time
-target changes       -> old pending move cancelled
-5.0     -> due_at = detected_at + 5.0 exactly
-```
-
-Package/static validation:
-
-- JavaScript `node --check`: ผ่าน
-- Bot Python compile: ผ่าน
-- JSON parse: 18 files ผ่าน
-- ZIP CRC/integrity: ผ่าน
-- package entries: 81
-- BP/RP version: `[1,7,5]`
-- UUID เดิมยังคงเดิม
-
-> Barrier และ delay tests ข้างต้นเป็น static/mock regression. BDS geometry จริงและ Discord Voice latency/rate-limit ควรยืนยันบน server จริงด้วย `/test` diagnostics ใหม่
-
-## Addon V1.7.5 Package
-
-SHA-256:
-
-```text
-d5c02b3b1732a4e4188b745108c15da6284bb51312854064a69e0f4b7adf7852
-```
-
-Source patch:
-
-```text
-addon-patches/v1.7.5-acoustic-span-desired-delay.patch
-```
-
-## Version History ที่ยังคงอยู่
+- acoustic-blocking barrier span attempt
+- Bot desired-state move-delay debounce
+- configured/applied/pending delay diagnostics
 
 ### V1.7.4
 
-- Range-scaled Barrier Span
+- range-scaled Barrier Span
 - Voice Move Delay UI `0–5`
 - realtime `/test` Performance Counter
 
 ### V1.7.3
 
-- symmetric Head/Chest raycast A→B + B→A
+- symmetric Head/Chest A→B + B→A raycast
 - endpoint epsilon `0.02`
-- ปิดประตูสามารถตัด existing group ได้ทันที
+- closed blocker can split an existing group immediately
 
 ### V1.7.2
 
@@ -236,9 +257,9 @@ addon-patches/v1.7.5-acoustic-span-desired-delay.patch
 
 ## Architecture
 
-Minecraft Acoustic Groups เป็น source of truth ของ proximity. Discord Bot นำ desired groups ไปจัด Voice Channel โดย Phone Call / Group Call มี priority เหนือ proximity ตามระบบเดิม
+Minecraft Acoustic Groups เป็น source of truth ของ proximity. Discord Bot นำ desired groups ไปจัด Voice Channel โดย Phone Call / Group Call มี priority เหนือ proximity.
 
-Legacy Zone / Part / Room ไม่ใช่ dependency ของ proximity ใน V1.7.x
+Legacy Zone / Part / Room ไม่ใช่ dependency ของ proximity ใน V1.7.x.
 
 ## Commands
 
@@ -246,7 +267,7 @@ Legacy Zone / Part / Room ไม่ใช่ dependency ของ proximity ใ�
 - `/backup` — สำรองข้อมูล Bot
 - `/restore` — กู้ข้อมูล Bot
 - `/whitelist` — จัดการ whitelist
-- `/test` — Test `botvc` + realtime performance / delay diagnostics
+- `/test` — Test `botvc` + realtime performance / delay / barrier diagnostics
 
 ## Run Bot
 
