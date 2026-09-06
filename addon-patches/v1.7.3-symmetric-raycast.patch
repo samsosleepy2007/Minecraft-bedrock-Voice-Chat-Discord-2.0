@@ -1,0 +1,137 @@
+--- a/VcBP/scripts/main.js
++++ b/VcBP/scripts/main.js
+@@ -14,7 +14,7 @@
+ from'@minecraft/server-net';
+ const KEY_URL="vc:server_url", KEY_ACTIVE="vc:is_active", KEY_RANGE="vc:range", KEY_MSGS="vc:messages", KEY_GUILD="vc:guild_id", KEY_PHONE="vc:phone_number", KEY_CONTACTS="vc:contacts", KEY_GROUPS="vc:groups", KEY_RANDOM_CALL_OPTIN="vc:random_call_optin", KEY_MIC_DISABLED="vc:mic_disabled", KEY_HEADPHONE_DISABLED="vc:headphone_disabled", KEY_AUDIO_TAG_BASE="vc:audio_tag_base", KEY_EMOJI_HIDDEN="vc:emoji_hidden", PHONE_ITEM_ID="vc:phone", PHONE_ACTIVE_ITEM_ID="vc:phone_active", AUDIO_CONTROL_ITEM_ID="vc:audio_control", EMOJI_MIC_ON="\uE900", EMOJI_MIC_OFF="\uE910", EMOJI_HEADPHONE_ON="\uE901", EMOJI_HEADPHONE_OFF="\uE911", PLAYER_ARM_RAISE_ANIM="animation.vc_phone.player_arm_raise", PLAYER_ARM_HOLD_ANIM="animation.vc_phone.player_arm_hold", PLAYER_ARM_RESET_ANIM="animation.vc_phone.player_arm_reset", PLAYER_ARM_ANIM_CONTROLLER="controller.animation.vc_phone.player_arm_pose";
+ 
+-// --- Voice Chat Connector 1.7.2: Acoustic group re-entry reconciliation + Discord-driven test bot; Zone/Room removed ---
++// --- Voice Chat Connector 1.7.3: Symmetric acoustic raycast + re-entry reconciliation + Discord-driven test bot; Zone/Room removed ---
+ const KEY_WORLD_ID = "vc:world_id";
+ const PHONE_OWNER_PREFIX = "vc:phone_owner_";
+ const ACOUSTIC_LEAVE_BUFFER = 2;
+@@ -2688,7 +2688,7 @@
+     ` | §lระยะเสียง:§r §e${range} บล็อก\n` +
+     `§lลิงก์เชื่อมต่อ:§r ${configured ? "§a" + rawUrl : "§c(ยังไม่ได้ตั้งค่า)"}\n` +
+     `§lGuild ID:§r ${guildId || "§c(ยังไม่ได้ตั้งค่า)"}\n\n` +
+-    `§e--- Voice Chat V1.7.2 ---\n` +
++    `§e--- Voice Chat V1.7.3 ---\n` +
+     `§f• Proximity ใช้ Range + Centroid + Strict Distance + Raycast\n` +
+     `§f• ระบบ Zone / Part / Room ถูกถอดออกแล้ว\n` +
+     `§f• การทดสอบ botvc ให้ใช้คำสั่ง §b/test§f ใน Discord`;
+@@ -2916,28 +2916,48 @@
+   if (!a.entity || !b.entity || a.dimension !== b.dimension) return false;
+   const distance = acousticDistance(a, b);
+   if (distance <= 0.01) return true;
+-  const cast = (start, end) => {
++
++  // V1.7.3: use a symmetric segment test so an existing acoustic group and
++  // a re-joining group see the same occlusion result regardless of whether
++  // the caller happens to check A→B or B→A.  The old 0.25-block endpoint
++  // trim could skip thin/near-end blockers such as a closed door next to a
++  // player. Keep only a tiny epsilon to avoid sampling beyond the endpoint.
++  const RAY_ENDPOINT_EPSILON = 0.02;
++  const castOneWay = (dimension, start, end) => {
+     const dx = end.x - start.x, dy = end.y - start.y, dz = end.z - start.z;
+     const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+     if (len <= 0.01) return true;
+     try {
+-      const hit = a.entity.dimension.getBlockFromRay(
++      const hit = dimension.getBlockFromRay(
+         start,
+         { x: dx / len, y: dy / len, z: dz / len },
+-        { maxDistance: Math.max(0.1, len - 0.25), includeLiquidBlocks: false, includePassableBlocks: false }
++        {
++          maxDistance: Math.max(0.01, len - RAY_ENDPOINT_EPSILON),
++          includeLiquidBlocks: false,
++          includePassableBlocks: false
++        }
+       );
+       return !hit;
+     } catch (_) {
+       return false;
+     }
+   };
++  const segmentClear = (startA, startB) => {
++    // A wall/door blocks the acoustic segment if either direction observes it.
++    // Requiring both directions to be clear removes direction-dependent
++    // preserve/rejoin behavior while retaining Head OR Chest fallback below.
++    return castOneWay(a.entity.dimension, startA, startB) &&
++      castOneWay(b.entity.dimension, startB, startA);
++  };
++
+   let aHead, bHead;
+   try { aHead = a.entity.getHeadLocation(); } catch (_) { aHead = { x: a.location.x, y: a.location.y + 1.6, z: a.location.z }; }
+   try { bHead = b.entity.getHeadLocation(); } catch (_) { bHead = { x: b.location.x, y: b.location.y + 1.6, z: b.location.z }; }
+-  if (cast(aHead, bHead)) return true;
++  if (segmentClear(aHead, bHead)) return true;
++
+   const aChest = { x: a.location.x, y: a.location.y + 1.0, z: a.location.z };
+   const bChest = { x: b.location.x, y: b.location.y + 1.0, z: b.location.z };
+-  return cast(aChest, bChest);
++  return segmentClear(aChest, bChest);
+ }
+ function buildAcousticGroups(entities, joinRange) {
+   const range = Math.max(1, Number(joinRange) || 10);
+--- a/VcBP/manifest.json
++++ b/VcBP/manifest.json
+@@ -1,13 +1,13 @@
+ {
+   "format_version": 2,
+   "header": {
+-    "name": "Voice Chat Connector V1.7.2",
++    "name": "Voice Chat Connector V1.7.3",
+     "description": "Voice Bot Remote + JSON UI Phone + phone call pose animation",
+     "uuid": "78152348-5111-4426-9721-123356789123",
+     "version": [
+       1,
+       7,
+-      2
++      3
+     ],
+     "min_engine_version": [
+       1,
+@@ -23,7 +23,7 @@
+       "version": [
+         1,
+         7,
+-        2
++        3
+       ],
+       "uuid": "89562314-5236-4589-7845-123456789456"
+     },
+@@ -32,7 +32,7 @@
+       "version": [
+         1,
+         7,
+-        2
++        3
+       ],
+       "uuid": "12345678-1234-1234-1234-123456789123"
+     }
+--- a/VcRP/manifest.json
++++ b/VcRP/manifest.json
+@@ -1,13 +1,13 @@
+ {
+   "format_version": 2,
+   "header": {
+-    "name": "Voice Chat Connector RP V1.7.2",
++    "name": "Voice Chat Connector RP V1.7.3",
+     "description": "Resource pack with phone attachable and in-call animation",
+     "uuid": "31f0dfcb-b04b-432f-80f1-67b7e777f111",
+     "version": [
+       1,
+       7,
+-      2
++      3
+     ],
+     "min_engine_version": [
+       1,
+@@ -22,7 +22,7 @@
+       "version": [
+         1,
+         7,
+-        2
++        3
+       ]
+     }
+   ]
