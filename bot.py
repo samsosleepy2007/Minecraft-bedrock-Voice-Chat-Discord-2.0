@@ -2,7 +2,7 @@ from pathlib import Path
 import base64
 import lzma
 
-# V1.7.3 hotfix layer over the lossless V1.7.0 source.
+# V1.7.4 hotfix layer over the lossless V1.7.0 source.
 # Render can keep using: python bot.py
 _payload_path = Path(__file__).with_name("bot_source.py.xz.b64")
 _source = lzma.decompress(base64.b64decode(_payload_path.read_text(encoding="utf-8").strip())).decode("utf-8")
@@ -12,12 +12,78 @@ def _patch_once(old, new, label):
     """Apply one required source hotfix and fail loudly if the embedded source changed."""
     global _source
     if old not in _source:
-        raise RuntimeError(f"V1.7.3 hotfix anchor not found: {label}")
+        raise RuntimeError(f"V1.7.4 hotfix anchor not found: {label}")
     _source = _source.replace(old, new, 1)
 
 
-_patch_once('BOT_VERSION = "1.7.0"', 'BOT_VERSION = "1.7.3"', "BOT_VERSION")
-_patch_once('# --- ระบบจัดการห้องเสียง V1.7.0: Acoustic Groups only ---', '''async def ensure_bot_voice_connection(guild, target, reason="acoustic-test"):
+_patch_once('BOT_VERSION = "1.7.0"', 'BOT_VERSION = "1.7.4"', "BOT_VERSION")
+
+# V1.7.4 owns player move throttling with a per-member wrapper below. Disable
+# the legacy global 3-second gate so different Minecraft guilds can use their
+# own move_delay and so one member never serializes another member's moves.
+_patch_once('MOVE_COOLDOWN = 3.0', 'MOVE_COOLDOWN = 0.0', "legacy MOVE_COOLDOWN")
+
+_patch_once('# --- ระบบจัดการห้องเสียง V1.7.0: Acoustic Groups only ---', '''# --- V1.7.4 runtime Voice Move Delay -----------------------------------------
+# Addon Protocol V3 may include optional move_delay (0.0-5.0 seconds).
+# Capture it as soon as aiohttp decodes /update_coords JSON, then enforce the
+# delay per Discord member at the actual Member.move_to boundary. This keeps
+# the setting local to each guild and prevents a global sleep/queue.
+VC_DEFAULT_MOVE_DELAY = 3.0
+vc_move_delay_by_guild = {}
+vc_member_last_move = {}
+
+_vc_original_request_json = web.Request.json
+async def _vc_request_json_with_move_delay(request, *args, **kwargs):
+    payload = await _vc_original_request_json(request, *args, **kwargs)
+    if isinstance(payload, dict) and payload.get("protocol_version") == 3:
+        raw_guild_id = payload.get("guild_id")
+        try:
+            guild_id = int(str(raw_guild_id).strip())
+        except (TypeError, ValueError):
+            guild_id = None
+        if guild_id is not None:
+            try:
+                delay = float(payload.get("move_delay", VC_DEFAULT_MOVE_DELAY))
+                if not math.isfinite(delay):
+                    raise ValueError("non-finite move_delay")
+            except (TypeError, ValueError):
+                delay = VC_DEFAULT_MOVE_DELAY
+            delay = max(0.0, min(5.0, round(delay, 1)))
+            previous = vc_move_delay_by_guild.get(guild_id)
+            vc_move_delay_by_guild[guild_id] = delay
+            if previous is None or abs(previous - delay) > 1e-9:
+                print(f"[Voice {BOT_VERSION}] Guild {guild_id} move delay = {delay:.1f}s")
+    return payload
+web.Request.json = _vc_request_json_with_move_delay
+
+_vc_original_member_move_to = discord.Member.move_to
+async def _vc_rate_limited_member_move_to(member, channel, *, reason=None):
+    guild = getattr(member, "guild", None)
+    guild_id = getattr(guild, "id", None)
+    member_id = getattr(member, "id", None)
+    current_voice = getattr(member, "voice", None)
+    current_channel = getattr(current_voice, "channel", None) if current_voice else None
+    target_id = getattr(channel, "id", None) if channel is not None else None
+
+    # Never spend a Discord move request when the desired state already matches.
+    if current_channel is not None and target_id is not None and current_channel.id == target_id:
+        return None
+
+    delay = vc_move_delay_by_guild.get(guild_id, VC_DEFAULT_MOVE_DELAY)
+    key = (guild_id, member_id)
+    now = time.monotonic()
+    last = vc_member_last_move.get(key, -1e12)
+    if delay > 0.0 and (now - last) < delay:
+        return None
+
+    result = await _vc_original_member_move_to(member, channel, reason=reason)
+    vc_member_last_move[key] = time.monotonic()
+    return result
+
+discord.Member.move_to = _vc_rate_limited_member_move_to
+
+
+async def ensure_bot_voice_connection(guild, target, reason="acoustic-test"):
     """Reliable Discord bot VoiceClient connect/move for Test and Acoustic Groups."""
     if not isinstance(target, discord.VoiceChannel):
         print(f"[Voice {BOT_VERSION}] Invalid voice target: {target!r}")
@@ -86,7 +152,7 @@ _patch_once('# --- ระบบจัดการห้องเสียง V1.
         return False
 
 
-# --- ระบบจัดการห้องเสียง V1.7.3: Acoustic Groups only ---''', "voice helper")
+# --- ระบบจัดการห้องเสียง V1.7.4: Acoustic Groups only ---''', "voice helper + move delay")
 _patch_once('''            if mem == guild.me:
                 try:
                     if guild.voice_client:
@@ -136,4 +202,4 @@ _patch_once('''        await assign_acoustic_groups_in_category(
                 test_target = start_channel
             await ensure_bot_voice_connection(guild, test_target, reason="test-fallback")
 ''', "test fallback")
-exec(compile(_source, "bot_v1.7.3.py", "exec"), globals(), globals())
+exec(compile(_source, "bot_v1.7.4.py", "exec"), globals(), globals())
