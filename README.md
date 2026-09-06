@@ -1,8 +1,20 @@
-# Minecraft Bedrock Voice Chat Discord 2.0 — V1.7.0
+# Minecraft Bedrock Voice Chat Discord 2.0 — V1.7.2
 
-Bot Discord สำหรับ Minecraft Bedrock Voice Chat Connector V1.7.0
+Discord Bot สำหรับ Minecraft Bedrock Voice Chat Connector
 
-## อัปเดต V1.7.0
+## อัปเดต V1.7.2 — Test Voice Fix
+
+- แก้ปัญหา `/test` ที่ Minecraft เสก `botvc` สำเร็จ แต่ Discord Bot ไม่เข้า Voice Channel
+- เพิ่มตัวจัดการ VoiceClient โดยตรงสำหรับ Test/Raycast เพื่อรองรับทั้ง connect, move และ stale VoiceClient
+- ตรวจ `View Channel` + `Connect` ก่อนพยายามให้บอทเข้า Voice Channel
+- เพิ่ม timeout/reconnect ให้การเชื่อมต่อ VoiceClient
+- ไม่กลืน exception ของการเชื่อมต่ออีกต่อไป และพิมพ์สาเหตุจริงลง Render log เช่น permission, timeout หรือ Discord voice connection error
+- ถ้า acoustic room pool ว่างหรือ `botvc` ยังเป็นกลุ่มเดี่ยว ระบบ Test จะมี fallback target เป็นห้องเสียงของเจ้าของ Test → ห้องเสียงแรกใน Category → Lobby ตามลำดับ
+- `/test` ตรวจ `/setup` และตรวจว่ามี Voice Channel ที่บอทมีสิทธิ์ Connect ก่อนเริ่ม Test
+- รองรับกรณี VoiceClient เดิมค้าง/หลุด โดย disconnect แล้วสร้าง connection ใหม่
+- เพิ่ม `discord.py[voice]` ใน dependency เพื่อให้ environment ของ Render ติดตั้งส่วนรองรับ Voice ครบ
+
+## V1.7.0 ที่ยังคงอยู่
 
 - Rework `/test` ใหม่: ผู้ใช้ต้องลงทะเบียน Xbox Gamertag ก่อนใช้งาน
 - `/test` ใช้ Gamertag ที่ลงทะเบียนเพื่อหา Minecraft world/snapshot ที่ผู้เล่นออนไลน์อยู่
@@ -17,13 +29,13 @@ Bot Discord สำหรับ Minecraft Bedrock Voice Chat Connector V1.7.0
 
 ## ถอดระบบ Legacy
 
-V1.7.0 ลบระบบ Zone / Part / Room ออกจาก voice architecture แล้ว:
+V1.7.x ลบระบบ Zone / Part / Room ออกจาก voice architecture แล้ว:
 
 - ลบ HTTP `/zones` และ `/zone/*`
 - ลบ Discord `/zone`, `/zones`, `/delzone`, `/zonerange`, `/range`
 - ลบ Zone/Room routing และ centroid fallback เก่าฝั่ง Bot
-- Minecraft Addon V1.7.0 ใช้ Acoustic Groups จาก Raycast เป็นระบบ proximity เพียงระบบเดียว
-- ถ้า `server_data.json` เก่ามีข้อมูล Zone บอตจะสร้าง `server_data.json.before_remove_zones_*.json` ก่อน migration แล้วลบ field `zones`
+- Minecraft Addon ใช้ Acoustic Groups จาก Raycast เป็นระบบ proximity เพียงระบบเดียว
+- ถ้า `server_data.json` เก่ามีข้อมูล Zone บอตจะสร้าง backup ก่อน migration แล้วลบ field `zones`
 
 ## Protocol V3
 
@@ -65,3 +77,5 @@ Environment variables:
 - `DASHBOARD_PASS`
 - `PORT`
 - `LOG_WEBHOOK_URL` (optional)
+
+> หมายเหตุ: runtime V1.7.2 ใช้ hotfix layer ใน `bot.py` ครอบ source V1.7.0 ที่เก็บแบบ XZ+Base64 เพื่อให้ Render ใช้งาน source เดิมได้โดยไม่ต้องเปลี่ยนโครงสร้าง repository
