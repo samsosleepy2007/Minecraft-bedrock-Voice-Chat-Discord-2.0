@@ -30,7 +30,7 @@
      player.onScreenDisplay.setActionBar(actionText);
 @@ -2702,7 +2705,7 @@
      `§lหน่วงย้าย Voice:§r §e${moveDelay.toFixed(1)} วินาที\n` +
-     `§lลิงก์เชื่อมต่อ:§r ${configured ? "§a" + rawUrl : "§c(ยังไม่ได้ตั้งค่า)"}\n` +
+     `§lลิงก์เชื่อมต่อ:§r ${configured ? "§a" + rawUrl : "§c(ยังไม่ได้ตั่งค่า)"}\n` +
      `§lGuild ID:§r ${guildId || "§c(ยังไม่ได้ตั้งค่า)"}\n\n` +
 -    `§e--- Voice Chat V1.7.4 ---\n` +
 +    `§e--- Voice Chat V1.7.5 ---\n` +
@@ -126,6 +126,8 @@
 -    return acousticBlockPresent(dimension, loc);
 +    return acousticBlockBlocksRay(dimension, loc, direction);
    };
+   const spanAtLeast = axis => {
+     let span = 1;
 @@ -3013,6 +3068,8 @@
      return { enough: span >= threshold, span };
    };
@@ -133,20 +135,35 @@
 +  // A barrier must satisfy BOTH dimensions. Range 5 therefore treats 5×3
 +  // and 5×4 as acoustically bypassable, while 5×5 (or larger) blocks.
    const width = spanAtLeast(widthAxis);
+   if (!width.enough) {
+     const result = { blocks: false, width: width.span, height: 0 };
 @@ -3029,7 +3086,7 @@
+   const distance = acousticDistance(a, b);
+   if (distance <= 0.01) return true;
+ 
 -  // V1.7.4 keeps the V1.7.3 symmetric endpoint fix, but a direct obstruction
 +  // V1.7.5 keeps the V1.7.3 symmetric endpoint fix, but a direct obstruction
+   // only becomes a full acoustic barrier when its effective WIDTH and HEIGHT
+   // are both at least the microphone range. Small pillars/low walls therefore
+   // allow sound to route around them, while room-sized walls still isolate it.
 @@ -3078,6 +3135,7 @@
    const byName = new Map(entities.map(e => [e.name, e]));
    const pairCache = new Map();
    acousticBarrierCache = new Map();
 +  acousticBarrierCellCache = new Map();
+   const pairPass = (a, b, limit) => {
+     perfInc("pair_checks");
+     if (a.dimension !== b.dimension || acousticDistance(a, b) > limit) return false;
 @@ -3173,6 +3231,7 @@
        acousticPerfSamples = [];
        acousticPerfActionBarText = "";
        acousticPerfTestActive = false;
 +      botMoveDelayDebug = null;
+       // Restore the normal per-player action bar immediately after /test ends.
+       for (const player of getPlayers()) {
+         try {
 @@ -3203,10 +3262,15 @@
+   acousticPerfCurrent.sample_count = acousticPerfSamples.length;
    acousticPerfCurrent.tick_budget_pct = Math.round((elapsed / 50) * 1000) / 10;
    const p = acousticPerfCurrent;
 +  const applied = Number.isFinite(Number(botAppliedMoveDelay)) ? Number(botAppliedMoveDelay) : null;
@@ -159,6 +176,9 @@
      `§8| §fTick ${p.tick_budget_pct}% §8| §fP${p.players} G${p.groups} Pair${p.unique_pairs || 0} ` +
 -    `Ray${p.raycasts || 0} Wall${p.barrier_scans || 0} Cache${p.barrier_cache_hits || 0}`;
 +    `Ray${p.raycasts || 0} Wall${p.barrier_scans || 0} Cache${p.barrier_cache_hits || 0} §8| §e${delayText}`;
+   syncAllAudioActionBarStatus();
+   return { ...acousticPerfCurrent };
+ }
 @@ -3241,6 +3305,8 @@
      blocked_rays: 0,
      barrier_scans: 0,
@@ -166,7 +186,10 @@
 +    barrier_cell_cache_hits: 0,
 +    barrier_probe_rays: 0,
      block_checks: 0
+   } : null;
+   const acousticStartedAt = Date.now();
 @@ -3297,6 +3363,18 @@
+     if (response.status >= 200 && response.status < 300) {
        const body = JSON.parse(response.body || "{}");
        globalICMap = body.ic_map || {};
 +      if (Number.isFinite(Number(body.move_delay_applied))) botAppliedMoveDelay = Number(body.move_delay_applied);
@@ -183,6 +206,7 @@
 +      }
        pendingCommandAcks = [];
        await executeServerCommands(body.commands || []);
+     }
 --- a/VcBP/manifest.json
 +++ b/VcBP/manifest.json
 @@ -1,13 +1,13 @@
@@ -191,15 +215,34 @@
    "header": {
 -    "name": "Voice Chat Connector V1.7.4",
 +    "name": "Voice Chat Connector V1.7.5",
-@@
+     "description": "Voice Bot Remote + JSON UI Phone + phone call pose animation",
+     "uuid": "78152348-5111-4426-9721-123356789123",
+     "version": [
+       1,
+       7,
 -      4
 +      5
-@@
+     ],
+     "min_engine_version": [
+       1,
+@@ -23,7 +23,7 @@
+       "version": [
+         1,
+         7,
 -        4
 +        5
-@@
+       ],
+       "uuid": "89562314-5236-4589-7845-123456789456"
+     },
+@@ -32,7 +32,7 @@
+       "version": [
+         1,
+         7,
 -        4
 +        5
+       ],
+       "uuid": "12345678-1234-1234-1234-123456789123"
+     }
 --- a/VcRP/manifest.json
 +++ b/VcRP/manifest.json
 @@ -1,13 +1,13 @@
@@ -208,9 +251,22 @@
    "header": {
 -    "name": "Voice Chat Connector RP V1.7.4",
 +    "name": "Voice Chat Connector RP V1.7.5",
-@@
+     "description": "Resource pack with phone attachable and in-call animation",
+     "uuid": "31f0dfcb-b04b-432f-80f1-67b7e777f111",
+     "version": [
+       1,
+       7,
 -      4
 +      5
-@@
+     ],
+     "min_engine_version": [
+       1,
+@@ -22,7 +22,7 @@
+       "version": [
+         1,
+         7,
 -        4
 +        5
+       ]
+     }
+   ]
