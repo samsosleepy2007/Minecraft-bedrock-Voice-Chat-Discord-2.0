@@ -1,0 +1,434 @@
+--- a/VcBP/scripts/main.js
++++ b/VcBP/scripts/main.js
+@@ -14,12 +14,19 @@
+ from'@minecraft/server-net';
+ const KEY_URL="vc:server_url", KEY_ACTIVE="vc:is_active", KEY_RANGE="vc:range", KEY_MSGS="vc:messages", KEY_GUILD="vc:guild_id", KEY_PHONE="vc:phone_number", KEY_CONTACTS="vc:contacts", KEY_GROUPS="vc:groups", KEY_RANDOM_CALL_OPTIN="vc:random_call_optin", KEY_MIC_DISABLED="vc:mic_disabled", KEY_HEADPHONE_DISABLED="vc:headphone_disabled", KEY_AUDIO_TAG_BASE="vc:audio_tag_base", KEY_EMOJI_HIDDEN="vc:emoji_hidden", PHONE_ITEM_ID="vc:phone", PHONE_ACTIVE_ITEM_ID="vc:phone_active", AUDIO_CONTROL_ITEM_ID="vc:audio_control", EMOJI_MIC_ON="\uE900", EMOJI_MIC_OFF="\uE910", EMOJI_HEADPHONE_ON="\uE901", EMOJI_HEADPHONE_OFF="\uE911", PLAYER_ARM_RAISE_ANIM="animation.vc_phone.player_arm_raise", PLAYER_ARM_HOLD_ANIM="animation.vc_phone.player_arm_hold", PLAYER_ARM_RESET_ANIM="animation.vc_phone.player_arm_reset", PLAYER_ARM_ANIM_CONTROLLER="controller.animation.vc_phone.player_arm_pose";
+ 
+-// --- Voice Chat Connector 1.7.3: Symmetric acoustic raycast + re-entry reconciliation + Discord-driven test bot; Zone/Room removed ---
++// --- Voice Chat Connector 1.7.4: Range-scaled acoustic barriers + symmetric raycast + realtime /test profiler; Zone/Room removed ---
+ const KEY_WORLD_ID = "vc:world_id";
++const KEY_MOVE_DELAY = "vc:move_delay";
++const DEFAULT_MOVE_DELAY = 3.0;
+ const PHONE_OWNER_PREFIX = "vc:phone_owner_";
+ const ACOUSTIC_LEAVE_BUFFER = 2;
+ let vcSnapshotSequence = 0;
+ let acousticPreviousGroups = [];
++let acousticBarrierCache = new Map();
++let acousticPerfCurrent = null;
++let acousticPerfSamples = [];
++let acousticPerfActionBarText = "";
++let acousticPerfTestActive = false;
+ let pendingCommandAcks = [];
+ const processedCommandIds = new Set();
+ let isLoopRunning=false, globalICMap= {
+@@ -121,12 +128,17 @@
+ 
+ function syncAudioActionBarStatus(player) {
+   if (!player) return;
+-  try {
+-    if (!isAudioActionBarEnabled(player)) return;
+-    player.onScreenDisplay.setActionBar(getAudioActionBarText(player));
++  const perfText = acousticPerfActionBarText;
++  if (!perfText && !isAudioActionBarEnabled(player)) return;
++  const actionText = perfText || getAudioActionBarText(player);
++  try {
++    // V1.7.4: /test performance telemetry has priority over the optional
++    // microphone/headphone action bar. When Test ends this string is cleared
++    // and the player's normal audio action bar automatically resumes.
++    player.onScreenDisplay.setActionBar(actionText);
+   } catch (e) {
+     try {
+-      player.runCommandAsync(`title @s actionbar ${getAudioActionBarText(player)}`);
++      player.runCommandAsync(`title @s actionbar ${actionText}`);
+     } catch (e2) {}
+   }
+ }
+@@ -2681,15 +2693,17 @@
+   const active = Boolean(world.getDynamicProperty(KEY_ACTIVE));
+   const rawUrl = String(world.getDynamicProperty(KEY_URL) || "").trim();
+   const range = Math.max(1, Number(world.getDynamicProperty(KEY_RANGE) || 10));
++  const moveDelay = getMoveDelay();
+   const guildId = String(world.getDynamicProperty(KEY_GUILD) || "").trim();
+   const configured = /^https?:\/\//i.test(rawUrl);
+   const body =
+     `§lสถานะระบบ:§r ${active ? "§a[ เปิดใช้งาน ]" : "§c[ ปิดใช้งาน ]"}` +
+     ` | §lระยะเสียง:§r §e${range} บล็อก\n` +
++    `§lหน่วงย้าย Voice:§r §e${moveDelay.toFixed(1)} วินาที\n` +
+     `§lลิงก์เชื่อมต่อ:§r ${configured ? "§a" + rawUrl : "§c(ยังไม่ได้ตั้งค่า)"}\n` +
+     `§lGuild ID:§r ${guildId || "§c(ยังไม่ได้ตั้งค่า)"}\n\n` +
+-    `§e--- Voice Chat V1.7.3 ---\n` +
+-    `§f• Proximity ใช้ Range + Centroid + Strict Distance + Raycast\n` +
++    `§e--- Voice Chat V1.7.4 ---\n` +
++    `§f• Proximity ใช้ Range + Centroid + Strict Distance + Raycast + Barrier Span\n` +
+     `§f• ระบบ Zone / Part / Room ถูกถอดออกแล้ว\n` +
+     `§f• การทดสอบ botvc ให้ใช้คำสั่ง §b/test§f ใน Discord`;
+   const form = new ActionFormData()
+@@ -2749,34 +2763,69 @@
+     }
+   });
+ }
++function getMoveDelay() {
++  const raw = Number(world.getDynamicProperty(KEY_MOVE_DELAY));
++  if (!Number.isFinite(raw)) return DEFAULT_MOVE_DELAY;
++  return Math.max(0, Math.min(5, Math.round(raw * 10) / 10));
++}
++function saveVoiceSetup(player, url, guildId, range, moveDelay, activate, warningRestored = false) {
++  const safeDelay = Math.max(0, Math.min(5, Math.round(Number(moveDelay) * 10) / 10));
++  world.setDynamicProperty(KEY_URL, url);
++  world.setDynamicProperty(KEY_GUILD, guildId);
++  world.setDynamicProperty(KEY_RANGE, range);
++  world.setDynamicProperty(KEY_MOVE_DELAY, Number.isFinite(safeDelay) ? safeDelay : DEFAULT_MOVE_DELAY);
++  world.setDynamicProperty(KEY_ACTIVE, activate);
++  player.playSound("random.levelup");
++  const note = warningRestored ? " §7(คงค่าหน่วงเดิม)" : "";
++  player.sendMessage(`§a[ระบบ] บันทึกการตั้งค่าสำเร็จ! §fระยะ ${range} บล็อก | หน่วงย้าย ${getMoveDelay().toFixed(1)} วินาที${note}`);
++  if (activate) runVoiceLoop();
++}
++function confirmLowMoveDelay(player, pending, previousDelay) {
++  const chosen = Math.max(0, Math.min(5, Math.round(Number(pending.moveDelay) * 10) / 10));
++  const warning = new ActionFormData()
++    .title("§cคำเตือน: Voice Move Delay ต่ำ")
++    .body(
++      `§fคุณกำลังตั้งค่าหน่วงย้าย Voice เป็น §e${chosen.toFixed(1)} วินาที§f ซึ่งต่ำกว่าค่าแนะนำ §a3.0 วินาที§f\n\n` +
++      `§cการย้ายสมาชิกถี่เกินไปอาจเพิ่มโอกาสชน Discord API rate limit ทำให้การย้ายห้องล่าช้าหรือ Voice routing ไม่เสถียร\n\n` +
++      `§7ช่วงที่รองรับ: 0.0–5.0 วินาที`
++    )
++    .button(`§cยืนยันใช้ ${chosen.toFixed(1)} วินาที`)
++    .button(`§aคืนค่าหน่วงเดิม ${previousDelay.toFixed(1)} วินาที`);
++  warning.show(player).then(result => {
++    if (result.canceled || result.selection === 1) {
++      saveVoiceSetup(player, pending.url, pending.guildId, pending.range, previousDelay, pending.activate, true);
++      return;
++    }
++    saveVoiceSetup(player, pending.url, pending.guildId, pending.range, chosen, pending.activate, false);
++  }).catch(() => {});
++}
+ function showSetupForm(player) {
+   const currentUrl = String(world.getDynamicProperty(KEY_URL) || "");
+   const currentGuild = String(world.getDynamicProperty(KEY_GUILD) || "");
+   const currentRange = Math.max(1, Number(world.getDynamicProperty(KEY_RANGE) || 10));
++  const currentMoveDelay = getMoveDelay();
+   const form = new ModalFormData()
+     .title("ตั้งค่าการเชื่อมต่อ")
+     .textField("ลิงก์เชื่อมต่อบอท", "https://example.com หรือ https://example.com/update_coords", currentUrl)
+     .textField("Discord Guild ID", "123456789012345678", currentGuild)
+     .slider("ระยะได้ยินเสียง (บล็อก)", 3, 30, 1, Math.min(30, Math.max(3, currentRange)))
++    .slider("Voice Move Delay (วินาที)", 0, 5, 0.1, currentMoveDelay)
+     .toggle("เปิดใช้งานทันทีเมื่อบันทึก", true);
+   form.show(player).then(res => {
+     if (res.canceled) return showMainMenu(player);
+     const url = String(res.formValues?.[0] || "").trim();
+     const guildId = String(res.formValues?.[1] || "").trim();
+     const range = Number(res.formValues?.[2] || currentRange);
+-    const activate = Boolean(res.formValues?.[3]);
++    const moveDelay = Math.max(0, Math.min(5, Math.round(Number(res.formValues?.[3] ?? currentMoveDelay) * 10) / 10));
++    const activate = Boolean(res.formValues?.[4]);
+     if (!/^https?:\/\//i.test(url)) {
+       player.playSound("note.bass");
+       player.sendMessage("§c[ข้อผิดพลาด] ลิงก์ต้องขึ้นต้นด้วย http:// หรือ https://");
+       return showMainMenu(player);
+     }
+-    world.setDynamicProperty(KEY_URL, url);
+-    world.setDynamicProperty(KEY_GUILD, guildId);
+-    world.setDynamicProperty(KEY_RANGE, range);
+-    world.setDynamicProperty(KEY_ACTIVE, activate);
+-    player.playSound("random.levelup");
+-    player.sendMessage(`§a[ระบบ] บันทึกการตั้งค่าสำเร็จ! (ระยะเสียง: ${range} บล็อก)`);
+-    if (activate) runVoiceLoop();
++    const pending = { url, guildId, range, moveDelay, activate };
++    if (moveDelay < 3) return confirmLowMoveDelay(player, pending, currentMoveDelay);
++    saveVoiceSetup(player, url, guildId, range, moveDelay, activate, false);
+   });
+ }
+ function toggleActive(_0x4b9fd6, _0x48ec57) {
+@@ -2912,43 +2961,107 @@
+   const dz = member.location.z - center.z;
+   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+ }
+-function acousticRayClear(a, b) {
++function perfInc(key, amount = 1) {
++  if (!acousticPerfCurrent) return;
++  acousticPerfCurrent[key] = (acousticPerfCurrent[key] || 0) + amount;
++}
++function acousticBlockPresent(dimension, location) {
++  perfInc("block_checks");
++  try {
++    const block = dimension.getBlock(location);
++    if (!block) return false;
++    if (block.isAir) return false;
++    try { if (block.isLiquid) return false; } catch (_) {}
++    return true;
++  } catch (_) {
++    return false;
++  }
++}
++function scanBarrierSpan(dimension, hit, direction, barrierRange) {
++  const threshold = Math.max(1, Math.ceil(Number(barrierRange) || 1));
++  let blockLocation;
++  try { blockLocation = hit?.block?.location; } catch (_) { blockLocation = null; }
++  if (!blockLocation) return { blocks: true, width: threshold, height: threshold };
++
++  // Minecraft walls are block-grid aligned. Use the horizontal axis most
++  // perpendicular to the direct A↔B ray as the effective wall-width axis.
++  const dx = Math.abs(direction.x || 0), dz = Math.abs(direction.z || 0);
++  const widthAxis = dx >= dz ? "z" : "x";
++  const cacheKey = `${String(dimension.id || "dim")}|${blockLocation.x},${blockLocation.y},${blockLocation.z}|${widthAxis}|${threshold}`;
++  if (acousticBarrierCache.has(cacheKey)) {
++    perfInc("barrier_cache_hits");
++    return acousticBarrierCache.get(cacheKey);
++  }
++  perfInc("barrier_scans");
++
++  const atOffset = (axis, offset) => {
++    const loc = { x: blockLocation.x, y: blockLocation.y, z: blockLocation.z };
++    loc[axis] += offset;
++    return acousticBlockPresent(dimension, loc);
++  };
++  const spanAtLeast = axis => {
++    let span = 1;
++    for (let step = 1; step < threshold; step++) {
++      if (!atOffset(axis, step)) break;
++      span++;
++      if (span >= threshold) return { enough: true, span };
++    }
++    for (let step = 1; step < threshold && span < threshold; step++) {
++      if (!atOffset(axis, -step)) break;
++      span++;
++    }
++    return { enough: span >= threshold, span };
++  };
++
++  const width = spanAtLeast(widthAxis);
++  if (!width.enough) {
++    const result = { blocks: false, width: width.span, height: 0 };
++    acousticBarrierCache.set(cacheKey, result);
++    return result;
++  }
++  const height = spanAtLeast("y");
++  const result = { blocks: width.enough && height.enough, width: width.span, height: height.span };
++  acousticBarrierCache.set(cacheKey, result);
++  return result;
++}
++function acousticRayClear(a, b, barrierRange) {
+   if (!a.entity || !b.entity || a.dimension !== b.dimension) return false;
+   const distance = acousticDistance(a, b);
+   if (distance <= 0.01) return true;
+ 
+-  // V1.7.3: use a symmetric segment test so an existing acoustic group and
+-  // a re-joining group see the same occlusion result regardless of whether
+-  // the caller happens to check A→B or B→A.  The old 0.25-block endpoint
+-  // trim could skip thin/near-end blockers such as a closed door next to a
+-  // player. Keep only a tiny epsilon to avoid sampling beyond the endpoint.
++  // V1.7.4 keeps the V1.7.3 symmetric endpoint fix, but a direct obstruction
++  // only becomes a full acoustic barrier when its effective WIDTH and HEIGHT
++  // are both at least the microphone range. Small pillars/low walls therefore
++  // allow sound to route around them, while room-sized walls still isolate it.
+   const RAY_ENDPOINT_EPSILON = 0.02;
+   const castOneWay = (dimension, start, end) => {
+     const dx = end.x - start.x, dy = end.y - start.y, dz = end.z - start.z;
+     const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+     if (len <= 0.01) return true;
++    const direction = { x: dx / len, y: dy / len, z: dz / len };
+     try {
++      perfInc("raycasts");
+       const hit = dimension.getBlockFromRay(
+         start,
+-        { x: dx / len, y: dy / len, z: dz / len },
++        direction,
+         {
+           maxDistance: Math.max(0.01, len - RAY_ENDPOINT_EPSILON),
+           includeLiquidBlocks: false,
+           includePassableBlocks: false
+         }
+       );
+-      return !hit;
++      if (!hit) return true;
++      perfInc("blocked_rays");
++      const barrier = scanBarrierSpan(dimension, hit, direction, barrierRange);
++      return !barrier.blocks;
+     } catch (_) {
++      // Fail closed if the engine cannot evaluate an acoustic ray.
+       return false;
+     }
+   };
+-  const segmentClear = (startA, startB) => {
+-    // A wall/door blocks the acoustic segment if either direction observes it.
+-    // Requiring both directions to be clear removes direction-dependent
+-    // preserve/rejoin behavior while retaining Head OR Chest fallback below.
+-    return castOneWay(a.entity.dimension, startA, startB) &&
+-      castOneWay(b.entity.dimension, startB, startA);
+-  };
++  const segmentClear = (startA, startB) =>
++    castOneWay(a.entity.dimension, startA, startB) &&
++    castOneWay(b.entity.dimension, startB, startA);
+ 
+   let aHead, bHead;
+   try { aHead = a.entity.getHeadLocation(); } catch (_) { aHead = { x: a.location.x, y: a.location.y + 1.6, z: a.location.z }; }
+@@ -2964,10 +3077,17 @@
+   const leaveRange = range + ACOUSTIC_LEAVE_BUFFER;
+   const byName = new Map(entities.map(e => [e.name, e]));
+   const pairCache = new Map();
++  acousticBarrierCache = new Map();
+   const pairPass = (a, b, limit) => {
++    perfInc("pair_checks");
+     if (a.dimension !== b.dimension || acousticDistance(a, b) > limit) return false;
+     const key = [a.name, b.name].sort().join("|");
+-    if (!pairCache.has(key)) pairCache.set(key, acousticRayClear(a, b));
++    if (!pairCache.has(key)) {
++      perfInc("unique_pairs");
++      pairCache.set(key, acousticRayClear(a, b, range));
++    } else {
++      perfInc("pair_cache_hits");
++    }
+     return pairCache.get(key);
+   };
+   const canJoin = (candidate, group, limit) => {
+@@ -3047,10 +3167,54 @@
+   acousticPreviousGroups = groups.map(group => group.map(member => member.name));
+   return acousticPreviousGroups.map(group => [...group]);
+ }
++function finishAcousticPerf(startedAt, acousticEntities, groups, range, moveDelay, testActive) {
++  if (!testActive || !acousticPerfCurrent) {
++    if (acousticPerfTestActive) {
++      acousticPerfSamples = [];
++      acousticPerfActionBarText = "";
++      acousticPerfTestActive = false;
++      // Restore the normal per-player action bar immediately after /test ends.
++      for (const player of getPlayers()) {
++        try {
++          if (isAudioActionBarEnabled(player)) syncAudioActionBarStatus(player);
++          else clearAudioActionBarStatus(player);
++        } catch (_) {}
++      }
++    }
++    acousticPerfCurrent = null;
++    return null;
++  }
++  if (!acousticPerfTestActive) acousticPerfSamples = [];
++  acousticPerfTestActive = true;
++  const elapsed = Math.max(0, Date.now() - startedAt);
++  acousticPerfCurrent.last_ms = elapsed;
++  acousticPerfCurrent.players = acousticEntities.filter(e => e.name !== "botvc").length;
++  acousticPerfCurrent.entities = acousticEntities.length;
++  acousticPerfCurrent.candidate_pairs = Math.max(0, acousticEntities.length * (acousticEntities.length - 1) / 2);
++  acousticPerfCurrent.groups = groups.length;
++  acousticPerfCurrent.range = range;
++  acousticPerfCurrent.move_delay = moveDelay;
++  acousticPerfSamples.push(elapsed);
++  if (acousticPerfSamples.length > 20) acousticPerfSamples.shift();
++  const avg = acousticPerfSamples.reduce((sum, value) => sum + value, 0) / Math.max(1, acousticPerfSamples.length);
++  const peak = Math.max(...acousticPerfSamples, elapsed);
++  acousticPerfCurrent.avg_ms = Math.round(avg * 10) / 10;
++  acousticPerfCurrent.max_ms = peak;
++  acousticPerfCurrent.sample_count = acousticPerfSamples.length;
++  acousticPerfCurrent.tick_budget_pct = Math.round((elapsed / 50) * 1000) / 10;
++  const p = acousticPerfCurrent;
++  acousticPerfActionBarText =
++    `§bVC TEST PERF §f${p.last_ms}ms §7(avg ${p.avg_ms} / max ${p.max_ms}) ` +
++    `§8| §fTick ${p.tick_budget_pct}% §8| §fP${p.players} G${p.groups} Pair${p.unique_pairs || 0} ` +
++    `Ray${p.raycasts || 0} Wall${p.barrier_scans || 0} Cache${p.barrier_cache_hits || 0}`;
++  syncAllAudioActionBarStatus();
++  return { ...acousticPerfCurrent };
++}
+ async function sendData() {
+   const baseUrl = normalizeBaseUrl(world.getDynamicProperty(KEY_URL) || "");
+   if (!baseUrl) return;
+   const range = Math.max(1, Number(world.getDynamicProperty(KEY_RANGE) || 10));
++  const moveDelay = getMoveDelay();
+   const playerEntities = getPlayers().map(player => ({
+     entity: player,
+     name: player.name,
+@@ -3068,7 +3232,20 @@
+     headphone_disabled: false
+   }));
+   const acousticEntities = [...playerEntities, ...botEntities];
++  const testActive = botEntities.length > 0;
++  acousticPerfCurrent = testActive ? {
++    pair_checks: 0,
++    unique_pairs: 0,
++    pair_cache_hits: 0,
++    raycasts: 0,
++    blocked_rays: 0,
++    barrier_scans: 0,
++    barrier_cache_hits: 0,
++    block_checks: 0
++  } : null;
++  const acousticStartedAt = Date.now();
+   const acousticGroups = buildAcousticGroups(acousticEntities, range);
++  const acousticPerf = finishAcousticPerf(acousticStartedAt, acousticEntities, acousticGroups, range, moveDelay, testActive);
+   const users = acousticEntities.map(entry => ({
+     name: entry.name,
+     x: Math.floor(entry.location.x),
+@@ -3105,7 +3282,9 @@
+     timestamp: Date.now(),
+     users,
+     range,
++    move_delay: moveDelay,
+     acoustic_groups: acousticGroups,
++    ...(acousticPerf ? { acoustic_perf: acousticPerf } : {}),
+     calls,
+     command_acks: [...pendingCommandAcks]
+   };
+--- a/VcBP/manifest.json
++++ b/VcBP/manifest.json
+@@ -1,13 +1,13 @@
+ {
+   "format_version": 2,
+   "header": {
+-    "name": "Voice Chat Connector V1.7.3",
++    "name": "Voice Chat Connector V1.7.4",
+     "description": "Voice Bot Remote + JSON UI Phone + phone call pose animation",
+     "uuid": "78152348-5111-4426-9721-123356789123",
+     "version": [
+       1,
+       7,
+-      3
++      4
+     ],
+     "min_engine_version": [
+       1,
+@@ -23,7 +23,7 @@
+       "version": [
+         1,
+         7,
+-        3
++        4
+       ],
+       "uuid": "89562314-5236-4589-7845-123456789456"
+     },
+@@ -32,7 +32,7 @@
+       "version": [
+         1,
+         7,
+-        3
++        4
+       ],
+       "uuid": "12345678-1234-1234-1234-123456789123"
+     }
+--- a/VcRP/manifest.json
++++ b/VcRP/manifest.json
+@@ -1,13 +1,13 @@
+ {
+   "format_version": 2,
+   "header": {
+-    "name": "Voice Chat Connector RP V1.7.3",
++    "name": "Voice Chat Connector RP V1.7.4",
+     "description": "Resource pack with phone attachable and in-call animation",
+     "uuid": "31f0dfcb-b04b-432f-80f1-67b7e777f111",
+     "version": [
+       1,
+       7,
+-      3
++      4
+     ],
+     "min_engine_version": [
+       1,
+@@ -22,7 +22,7 @@
+       "version": [
+         1,
+         7,
+-        3
++        4
+       ]
+     }
+   ]
